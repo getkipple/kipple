@@ -1,0 +1,896 @@
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { platform } from "@platform";
+import type { Card, Library, UserFields, UserPatch } from "../lib/types";
+import { effectiveAction, effectiveTags, effectiveTopic, getOwnTopics, getTopicRules, matchesFilter, tagName, topicName } from "../lib/library";
+import { countDuplicateGroups, findDuplicates, groupDuplicates, isImportant, isUnsorted } from "../lib/smart";
+import { Overview, type OverviewSection } from "./Overview";
+import { TidyDialog, type TidyKind } from "./TidyDialog";
+import { TopicMenu } from "./TopicMenu";
+import { TodayDialog } from "./TodayDialog";
+import { Cleanup, NEW_SESSION, pileTitle, type CleanupSession } from "./Cleanup";
+import { breakdown, type Pile } from "../lib/cleanup";
+import { learnTopics, suggestTopic, suggestedFor, type TopicModel } from "../lib/suggest";
+import { candidates, localDate, makePlan, planFor, resolvePlan, withSkip, type DailyTask, type Skips, type TodayState } from "../lib/today";
+import { suggestMerges } from "../lib/tidy";
+import type { Aliases } from "../lib/library";
+import { buildIndex } from "../lib/search";
+import { linkCounts } from "../lib/linkcheck";
+import { QuickFind } from "./QuickFind";
+import { SuggestBanner } from "./SuggestBanner";
+import { Grid } from "./Grid";
+import { Detail } from "./Detail";
+import { Sidebar } from "./Sidebar";
+import { Icon } from "./Icon";
+import { SortMenu } from "./SortMenu";
+import { ViewMenu } from "./ViewMenu";
+import { T, compareText, formatNumber } from "../i18n";
+import { FEATURES } from "../lib/features";
+import type { TelegramAccount } from "../platform/types";
+import { actionLabel } from "../lib/types";
+import { track } from "../lib/telemetry";
+import { useNarrow } from "../lib/narrow";
+import {
+  OPEN_MODES,
+  SMART_LISTS,
+  SORTS,
+  TYPES,
+  cardKey,
+  CARDS_MIME,
+  dragIds,
+  loadPref,
+  matchesScope,
+  matchesSource,
+  matchesType,
+  savePref,
+  scopeTitle,
+  sortCards,
+  type ListKey,
+  type OpenMode,
+  type Scope,
+  type SortKey,
+  type TypeKey,
+  type ViewKey,
+  loadLook,
+  NO_LOOK,
+  saveLook,
+  type CardLook,
+} from "./nav";
+
+/** Marks a sideways-scrolling row as scrolled away from its start or end, for the edge fades. */
+function markEdges(el: HTMLElement | null) {
+  if (!el) return;
+  if (el.scrollLeft > 1) el.dataset.left = "";
+  else delete el.dataset.left;
+  if (el.scrollLeft + el.clientWidth < el.scrollWidth - 1) el.dataset.right = "";
+  else delete el.dataset.right;
+}
+
+/** "Looks like these belong here" stops counting here: enough to act on, and cheap on big libraries. */
+const SUGGEST_MAX = 50;
+
+/** Topics smaller than this aren't worth splitting into subgroups. */
+const GROUP_MIN = 12;
+
+export type Job = { label: string; done: number; total: number } | null;
+
+/** The library screen: sidebar, toolbar, board in one of four views, and the card panel. */
+export function Workspace(props: {
+  lib: Library;
+  rev: number;
+  job: Job;
+  needAi: number;
+  /** Show the "Tag N" button: AI is on, or the user hasn't been asked yet (pressing it asks). */
+  offerAi: boolean;
+  /** Undefined in the demo, which can't take a real import. */
+  onImport?: () => void;
+  onSettings: () => void;
+  /** Desktop only: opens "Send to Telegram". */
+  onTelegram?: () => void;
+  /** Load what was saved in Telegram since last time; set when signed in. */
+  onLoadTelegram?: () => void;
+  /** The signed-in Telegram account, shown at the top of the sidebar. */
+  tgAccount?: TelegramAccount | null;
+  onRunAi: () => void;
+  /** Ask the AI to name one photo from its content (sends that picture). */
+  onNameImage?: (card: Card) => void;
+  /** Signed in to Telegram: jump to the card's message in Saved Messages. */
+  onOpenInTelegram?: (card: Card) => void;
+  onStop: () => void;
+  /** A null in the patch takes the field away again (undo on the cleanup screen). */
+  onEdit: (ids: number[], patch: UserPatch) => void;
+  /** Opens the dialog that deletes junk in Telegram, after its own copy and confirmation. */
+  onApplyTelegram?: () => void;
+  /** This library was just loaded for the first time: start on the cleanup screen. */
+  firstCleanup?: boolean;
+  /** Everything from a channel or site goes to a topic from now on; "" drops the rule. */
+  onRule: (kind: "channel" | "site", key: string, topic: string) => void;
+  /** Merged topics and tags, and saving a change to them. */
+  aliases: Aliases;
+  onAliases: (a: Aliases) => void;
+  /** Ask the AI for synonyms among topic or tag names; undefined when AI can't be used. */
+  askSynonyms?: (kind: TidyKind, counts: Map<string, number>) => Promise<Array<{ into: string; from: string[] }>>;
+  /** Split a topic into AI subgroups; undefined when AI can't be used. */
+  onGroupTopic?: (topic: string) => Promise<void>;
+  /** Topics made by hand: each returns the name the topic ends up under. */
+  onCreateTopic: (name: string) => Promise<string>;
+  onRenameTopic: (from: string, to: string) => Promise<string>;
+  onDeleteTopic: (name: string) => Promise<void>;
+  /** "Three for today": the saved plan, the tasks set aside, and saving either. */
+  today?: TodayState;
+  taskSkips: Skips;
+  onToday: (p: { today?: TodayState; skips?: Skips }) => void;
+  /** "Check links": asks every saved link whether it still opens; undefined where links can't be fetched. */
+  onCheckLinks?: () => void;
+}) {
+  const { lib, rev, onEdit } = props;
+  const [scope, setScope] = useState<Scope>({ kind: props.firstCleanup ? "cleanup" : "home" });
+  const [type, setType] = useState<TypeKey | null>(null);
+  const [tag, setTag] = useState<string | null>(null);
+  /** Cards forwarded from one channel or person, picked by clicking its name on a card. */
+  const [source, setSource] = useState<string | null>(null);
+  /** "Topic for this channel" menu, open next to the channel filter. */
+  const [ruleAt, setRuleAt] = useState<HTMLElement | null>(null);
+  /** A pile from the cleanup screen opened on the board ("View"): only its cards show. */
+  const [pile, setPile] = useState<{ title: string; ids: Set<number> } | null>(null);
+  /** What the cleanup screen keeps while the workspace is open: piles set aside and what can be undone. */
+  const [cleanupSession, setCleanupSession] = useState<CleanupSession>(NEW_SESSION);
+  const [query, setQuery] = useState("");
+  const [sort, setSort] = useState<SortKey>(() => loadPref("sort", SORTS.map((s) => s.key), "new"));
+  // Default is the even grid (all cards the same size); a new pref key so earlier saved "masonry" doesn't stick.
+  const [view, setView] = useState<ViewKey>(() => (FEATURES.views ? loadPref("layout", ["masonry", "grid", "list", "headlines"] as const, "grid") : "grid"));
+  const [sideOpen, setSideOpen] = useState(() => loadPref("sidebar", ["open", "closed"] as const, "open") === "open");
+  // On a phone the sidebar is a drawer over the board: closed at start, closed again after a pick,
+  // and never saved, so the desktop's open/closed preference stays as it was.
+  const narrow = useNarrow();
+  const [drawer, setDrawer] = useState(false);
+  const showSide = narrow ? drawer : sideOpen;
+  const sideToggle = useRef<HTMLButtonElement>(null);
+  // Turning the phone to landscape (wider than the breakpoint) forgets the drawer, so it doesn't
+  // pop back over the board on turning it back.
+  useEffect(() => {
+    if (!narrow) setDrawer(false);
+  }, [narrow]);
+  // The open drawer takes the focus (its first item), and gives it back to the toggle when it closes.
+  const drawerWas = useRef(false);
+  useEffect(() => {
+    if (drawer) document.querySelector<HTMLElement>(".workspace.narrow .sidebar .side-item")?.focus({ preventScroll: true });
+    else if (drawerWas.current) sideToggle.current?.focus({ preventScroll: true });
+    drawerWas.current = drawer;
+  }, [drawer]);
+  const [openMode, setOpenMode] = useState<OpenMode>(() => (FEATURES.openModes ? loadPref("open", OPEN_MODES.map((m) => m.key), "center") : "center"));
+  const [openId, setOpenId] = useState<number | null>(null);
+  const [selected, setSelected] = useState<Set<number>>(new Set());
+  const [tidy, setTidy] = useState<TidyKind | null>(null);
+  /** The open "Three for today" dialog: the tasks it started with and where. */
+  const [todayOpen, setTodayOpen] = useState<{ tasks: DailyTask[]; start: number; n: number } | null>(null);
+  const [bulkMoveAt, setBulkMoveAt] = useState<HTMLElement | null>(null);
+  /** Ctrl+K search over every card. */
+  const [quickOpen, setQuickOpen] = useState(false);
+  /** Topics whose "Looks like these belong here" was hidden, until the app restarts. */
+  const [hiddenSuggest, setHiddenSuggest] = useState<Set<string>>(new Set());
+  /** The open subgroup of the topic, by name, and whether the AI is grouping right now. */
+  const [sub, setSub] = useState<string | null>(null);
+  const [grouping, setGrouping] = useState(false);
+  const [groupError, setGroupError] = useState<string | null>(null);
+  const lastClicked = useRef<number | null>(null);
+  const searchRef = useRef<HTMLInputElement>(null);
+  // The filter pills change with every scope: re-check which edges need a fade after each render.
+  const quickRef = useRef<HTMLDivElement>(null);
+  useLayoutEffect(() => markEdges(quickRef.current));
+
+  // A merge in "Tidy up" renames topics and tags: follow the open topic and the chosen tag to
+  // their new name, or the board would stay on a name no card has any more and look empty.
+  useEffect(() => {
+    if (scope.kind === "topic" && topicName(scope.name) !== scope.name) setScope({ kind: "topic", name: topicName(scope.name) });
+    if (tag && tagName(tag) !== tag) setTag(tagName(tag));
+  }, [props.aliases]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Anonymous statistics (lib/telemetry.ts): only that these were used, never what was searched or opened.
+  const searching = query.trim().length >= 2;
+  useEffect(() => {
+    if (searching) track("search_used");
+  }, [searching]);
+  useEffect(() => {
+    if (openId != null) track("card_opened");
+  }, [openId]);
+  useEffect(() => {
+    if (scope.kind === "topic" || tag) track("topic_filtered");
+  }, [scope.kind === "topic" ? scope.name : null, tag]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  useEffect(() => savePref("sort", sort), [sort]);
+  useEffect(() => {
+    if (FEATURES.views) savePref("layout", view);
+  }, [view]);
+  const [look, setLook] = useState<CardLook>(() => (FEATURES.views ? loadLook() : NO_LOOK));
+  useEffect(() => {
+    if (FEATURES.views) saveLook(look);
+  }, [look]);
+  useEffect(() => savePref("sidebar", sideOpen ? "open" : "closed"), [sideOpen]);
+  useEffect(() => {
+    if (FEATURES.openModes) savePref("open", openMode);
+  }, [openMode]);
+
+  const index = useMemo(() => buildIndex(lib.cards), [lib, rev]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const base = useMemo(() => {
+    let list = lib.cards.filter((c) => !c.removed);
+    const q = query.trim();
+    if (q) {
+      const hits = new Set(index.search(q).map((h) => h.id as number));
+      list = list.filter((c) => hits.has(c.id));
+    }
+    return list;
+  }, [lib, rev, query, index]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Possible duplicates among the cards still in play (junk and hidden ones are already dealt with).
+  const dupes = useMemo(() => findDuplicates(base.filter((c) => matchesFilter(c, "all"))), [base]);
+
+  const listCounts = useMemo(() => {
+    const keys: ListKey[] = [...SMART_LISTS.map((l) => l.key), "junk", "sensitive", "recent", "unsorted", "duplicates"];
+    return Object.fromEntries(keys.map((k) => [k, base.filter((c) => matchesScope(c, { kind: "list", key: k }, dupes)).length]));
+  }, [base, dupes]);
+
+  const { topics, noTopic } = useMemo(() => {
+    const m = new Map<string, number>();
+    let none = 0;
+    for (const c of base) {
+      if (!matchesScope(c, { kind: "list", key: "all" })) continue;
+      const t = effectiveTopic(c);
+      if (t) m.set(t, (m.get(t) ?? 0) + 1);
+      else none++;
+    }
+    // The user's own topics show even before anything is in them.
+    for (const t of getOwnTopics()) if (!m.has(t)) m.set(t, 0);
+    return { topics: [...m.entries()].sort((a, b) => b[1] - a[1] || compareText(a[0], b[0])), noTopic: none };
+  }, [base, rev]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Searching from the overview or the cleanup screen searches everything, shown as a board.
+  const home = scope.kind === "home" && !query.trim();
+  const cleanup = scope.kind === "cleanup" && !query.trim();
+  const shown: Scope = (scope.kind === "home" || scope.kind === "cleanup") && !home && !cleanup ? { kind: "list", key: "all" } : scope;
+  const isDupes = shown.kind === "list" && shown.key === "duplicates";
+  // A new section, filter, sort or view gives a fresh board whose cards rise in again. Typing a
+  // search keeps the set, so cards already on screen don't replay the entrance on every letter.
+  const boardKey = `${JSON.stringify(shown)}|${sub}|${type}|${tag}|${source}|${pile?.title}|${sort}|${view}`;
+  const seenRef = useRef({ key: boardKey, ids: new Set<number>() });
+  if (seenRef.current.key !== boardKey) seenRef.current = { key: boardKey, ids: new Set<number>() };
+  const seen = seenRef.current.ids;
+
+  // Every topic and tag in use (search aside), for tidying up.
+  const names = useMemo(() => {
+    const topics = new Map<string, number>();
+    const tags = new Map<string, number>();
+    for (const c of lib.cards) {
+      if (c.removed || !matchesFilter(c, "all")) continue;
+      const t = effectiveTopic(c);
+      if (t) topics.set(t, (topics.get(t) ?? 0) + 1);
+      for (const x of effectiveTags(c)) tags.set(x, (tags.get(x) ?? 0) + 1);
+    }
+    return { topics, tags };
+  }, [lib, rev]); // eslint-disable-line react-hooks/exhaustive-deps
+  const topicNames = useMemo(() => [...new Set([...names.topics.keys(), ...getOwnTopics()])], [names]);
+
+  // "Three for today" (lib/today.ts). The plan is fixed for the day; a new day makes a new one.
+  const day = localDate();
+  const plan = useMemo(() => planFor(props.today, lib.cards, props.taskSkips, day), [props.today, lib, rev, props.taskSkips, day]); // eslint-disable-line react-hooks/exhaustive-deps
+  const planRef = useRef(plan);
+  planRef.current = plan;
+  const skipsRef = useRef(props.taskSkips);
+  skipsRef.current = props.taskSkips;
+  useEffect(() => {
+    if (FEATURES.today && plan !== props.today && plan.keys.length) props.onToday({ today: plan });
+  }, [plan]); // eslint-disable-line react-hooks/exhaustive-deps
+  const todayTasks = useMemo(() => resolvePlan(plan, lib.cards, props.taskSkips, day), [plan, lib, rev, props.taskSkips, day]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  function saveDone(key: string, done: boolean) {
+    const p = planRef.current;
+    const next = { ...p, done: done ? [...new Set([...p.done, key])] : p.done.filter((k) => k !== key) };
+    planRef.current = next;
+    props.onToday({ today: next });
+  }
+
+  function skipTask(key: string, how?: "week" | "never" | number) {
+    if (!how) return;
+    const next = withSkip(skipsRef.current, key, day, how === "never" ? true : how === "week" ? false : how);
+    skipsRef.current = next;
+    props.onToday({ skips: next });
+  }
+
+  function openToday(start: number) {
+    const pending = todayTasks.filter((t): t is DailyTask => !!t);
+    if (!pending.length) return;
+    // Start on the one clicked, then the rest in order, coming round to the ones before it.
+    const at = Math.max(0, todayTasks[start] ? pending.indexOf(todayTasks[start]!) : 0);
+    setTodayOpen({ tasks: [...pending.slice(at), ...pending.slice(0, at)], start: 0, n: (todayOpen?.n ?? 0) + 1 });
+  }
+
+  /** Three more after the day's plan: tomorrow's work, today. */
+  function moreToday() {
+    const p = planRef.current;
+    const fresh = makePlan(lib.cards, skipsRef.current, day, p.keys);
+    if (!fresh.keys.length) return;
+    const next = { ...p, keys: [...p.keys, ...fresh.keys] };
+    planRef.current = next;
+    props.onToday({ today: next });
+    const all = new Map(candidates(lib.cards, skipsRef.current, day).map((t) => [t.key, t]));
+    setTodayOpen({ tasks: fresh.keys.map((k) => all.get(k)!).filter(Boolean), start: 0, n: (todayOpen?.n ?? 0) + 1 });
+  }
+  const tidyCount = useMemo(() => suggestMerges(names.topics).length + (FEATURES.tags ? suggestMerges(names.tags).length : 0), [names]);
+
+  // What the archive is made of (lib/cleanup.ts): the cleanup screen's piles and the number left in the sidebar.
+  // Look-alike piles only change which pile a card is in, not how many are left: worked out for the screen alone.
+  const piles = useMemo(() => breakdown(lib.cards, Date.now(), cleanup), [lib, rev, cleanup]); // eslint-disable-line react-hooks/exhaustive-deps
+  /** A topic for a card with none, learned from the person's own sorting; worked out only once a topic menu asks. */
+  const suggest = useMemo(() => {
+    let model: TopicModel | undefined;
+    return (c: Card) => (effectiveTopic(c) ? undefined : suggestTopic((model ??= learnTopics(lib.cards)), c));
+  }, [lib, rev]); // eslint-disable-line react-hooks/exhaustive-deps
+  const cleanupLeft = useMemo(() => piles.piles.reduce((n, p) => n + p.cards.length, 0), [piles]);
+  /** "Looks like these belong here" on an open topic: unsorted cards the person's own sorting points to it. */
+  const topicSuggest = useMemo(
+    () => (scope.kind === "topic" && !query.trim() && !hiddenSuggest.has(scope.name) ? suggestedFor(lib.cards, scope.name, suggest, SUGGEST_MAX) : []),
+    // `suggest` already follows lib and rev; the scope is compared by its topic name.
+    [scope.kind === "topic" ? scope.name : null, query, hiddenSuggest, suggest], // eslint-disable-line react-hooks/exhaustive-deps
+  );
+  const links = useMemo(() => linkCounts(lib.cards), [lib, rev]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => {
+    // After a load from Telegram this comes when everything is in: someone already busy on the board stays there.
+    if (props.firstCleanup && scope.kind === "home" && !query.trim() && openId == null) pickScope({ kind: "cleanup" });
+  }, [props.firstCleanup]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const inScope = useMemo(() => base.filter((c) => matchesScope(c, shown, dupes) && (!pile || pile.ids.has(c.id))), [base, JSON.stringify(shown), dupes, pile]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const typeCounts = useMemo(() => Object.fromEntries(TYPES.map((t) => [t.key, inScope.filter((c) => matchesType(c, t.key)).length])) as Record<TypeKey, number>, [inScope]);
+
+  const inType = useMemo(() => inScope.filter((c) => matchesType(c, type)), [inScope, type]);
+
+  const tags = useMemo(() => {
+    const m = new Map<string, number>();
+    for (const c of inType) for (const t of effectiveTags(c)) m.set(t, (m.get(t) ?? 0) + 1);
+    return [...m.entries()].sort((a, b) => b[1] - a[1] || compareText(a[0], b[0]));
+  }, [inType]);
+
+  // AI subgroups of the open topic, counted among the cards shown now; a group whose cards all left disappears.
+  const groups = useMemo(() => {
+    if (scope.kind !== "topic") return [];
+    const here = new Set(inType.map((c) => c.id));
+    return (lib.subgroups?.[scope.name]?.groups ?? []).map((g) => ({ name: g.name, ids: new Set(g.ids.filter((id) => here.has(id))) })).filter((g) => g.ids.size > 0);
+  }, [lib, rev, scope, inType]); // eslint-disable-line react-hooks/exhaustive-deps
+  const subIds = sub ? groups.find((g) => g.name === sub)?.ids : undefined;
+
+  async function groupTopic() {
+    if (scope.kind !== "topic" || !props.onGroupTopic) return;
+    setGrouping(true);
+    setGroupError(null);
+    try {
+      await props.onGroupTopic(scope.name);
+      setSub(null);
+    } catch (e) {
+      setGroupError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setGrouping(false);
+    }
+  }
+
+  const visible = useMemo(() => {
+    let list = tag ? inType.filter((c) => effectiveTags(c).includes(tag)) : inType;
+    if (source) list = list.filter((c) => matchesSource(c, source));
+    if (subIds) list = list.filter((c) => subIds.has(c.id));
+    // Duplicates stay next to each other so the extras are easy to spot.
+    return isDupes ? groupDuplicates(list, dupes) : sortCards(list, sort);
+  }, [inType, tag, source, sort, isDupes, dupes, subIds]);
+
+  const sections = useMemo((): OverviewSection[] => {
+    if (!home) return [];
+    const take = (key: ListKey, order?: (cs: Card[]) => Card[]) => {
+      const cs = base.filter((c) => matchesScope(c, { kind: "list", key }, dupes));
+      return (order ? order(cs) : cs).slice(0, 8);
+    };
+    const o = T.overview;
+    return [
+      {
+        key: "unsorted",
+        icon: "inbox",
+        title: T.nav.unsorted,
+        hint: o.unsorted,
+        count: listCounts.unsorted,
+        cards: take("unsorted"),
+      },
+      { key: "important", icon: "star", title: T.nav.important, hint: o.important, count: listCounts.important, cards: take("important") },
+      ...(FEATURES.statuses
+        ? ([
+            { key: "read_later", icon: "clock", title: T.nav.readLater, hint: o.readLater, count: listCounts.read_later, cards: take("read_later") },
+            { key: "todo", icon: "check", title: T.nav.todo, hint: o.todo, count: listCounts.todo, cards: take("todo") },
+          ] as OverviewSection[])
+        : []),
+      { key: "recent", icon: "sortNew", title: T.nav.recent, hint: o.recent, count: listCounts.recent, cards: take("recent") },
+      {
+        key: "duplicates",
+        icon: "copy",
+        title: T.nav.duplicates,
+        hint: o.duplicates(countDuplicateGroups(base, dupes)),
+        count: listCounts.duplicates,
+        cards: take("duplicates", (cs) => groupDuplicates(cs, dupes)),
+      },
+    ];
+  }, [home, base, dupes, listCounts]);
+
+  const openIdx = openId == null ? -1 : visible.findIndex((c) => c.id === openId);
+  const openCard = openId == null ? null : lib.cards.find((c) => c.id === openId) ?? null;
+
+  /** Cards dragged toward a sidebar topic. On the board, only what's on screen: a selection kept across searches may hold cards it hides. */
+  function dragCards(ids: number[], e: React.DragEvent) {
+    e.dataTransfer.setData(CARDS_MIME, JSON.stringify(ids));
+    e.dataTransfer.effectAllowed = "move";
+  }
+
+  function pickScope(s: Scope) {
+    setDrawer(false);
+    setScope(s);
+    // The cleanup screen has keys of its own (Ctrl+Z); a card left open would answer them too.
+    if (s.kind === "cleanup") setOpenId(null);
+    setTag(null);
+    setSource(null);
+    setPile(null);
+    setSub(null);
+    setGroupError(null);
+    setSelected(new Set());
+  }
+
+  /** "View" on the cleanup screen: the pile's cards on the board, where each can be decided on its own. */
+  function viewPile(p: Pile) {
+    pickScope({ kind: "list", key: p.kind === "junk" ? "junk" : "all" });
+    setPile({ title: pileTitle(p), ids: new Set(p.cards.map((c) => c.id)) });
+  }
+
+  function toggleSelect(c: Card, range: boolean) {
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (range && lastClicked.current !== null) {
+        const a = visible.findIndex((x) => x.id === lastClicked.current);
+        const b = visible.findIndex((x) => x.id === c.id);
+        if (a >= 0 && b >= 0) for (const x of visible.slice(Math.min(a, b), Math.max(a, b) + 1)) next.add(x.id);
+      } else if (next.has(c.id)) next.delete(c.id);
+      else next.add(c.id);
+      lastClicked.current = c.id;
+      return next;
+    });
+  }
+
+  /** Shows every card from the channel the clicked card came from; from the overview, across all cards. */
+  function pickSource(name: string) {
+    if (scope.kind === "home" || scope.kind === "cleanup") setScope({ kind: "list", key: "all" });
+    setSub(null);
+    setSelected(new Set());
+    setRuleAt(null);
+    setSource(name);
+  }
+
+  function moveTo(c: Card, topic: string) {
+    onEdit([c.id], { topic });
+  }
+
+  function togglePin(c: Card) {
+    onEdit([c.id], { pinned: !isImportant(c) });
+  }
+
+  function toggleJunk(c: Card) {
+    const isJunk = effectiveAction(c) === "junk";
+    onEdit([c.id], { action: isJunk ? (c.ai?.action && c.ai.action !== "junk" ? c.ai.action : "reference") : "junk" });
+  }
+
+  /** The last change made with a key on the open card, so Ctrl+Z can put it back. */
+  const keyUndo = useRef<{ id: number; patch: UserFields } | null>(null);
+
+  /** I, 1-4 and Delete on the open card (nav.ts cardKey). A status or junk moves on to the next card. */
+  function sortOpenCard(c: Card, k: NonNullable<ReturnType<typeof cardKey>>) {
+    if (k.kind === "pin") {
+      keyUndo.current = { id: c.id, patch: { pinned: isImportant(c) } };
+      onEdit([c.id], { pinned: !isImportant(c) });
+      return;
+    }
+    if (k.action !== "junk" && !FEATURES.statuses) return; // keys 1-4 set the frozen statuses
+    const was = effectiveAction(c);
+    // The same key again takes junk back out; another status is set as is.
+    const action = k.action === "junk" && was === "junk" ? (c.ai?.action && c.ai.action !== "junk" ? c.ai.action : "reference") : k.action;
+    if (action === was) return;
+    // The edit log drops undefined, so "had no status" comes back as the status the card showed.
+    keyUndo.current = { id: c.id, patch: { action: c.user?.action ?? was ?? "reference" } };
+    const next = openIdx >= 0 ? (visible[openIdx + 1] ?? visible[openIdx - 1]) : undefined;
+    onEdit([c.id], { action });
+    if (next) setOpenId(next.id);
+  }
+
+  // A selection the current section or filter hides would still be hit by the bulk buttons: keep
+  // only what's on screen. A search is the exception: picking cards across several searches is a
+  // way to gather them, so those stay selected (and counted) until the search is cleared.
+  const searchActive = query.trim() !== "";
+  useEffect(() => {
+    if (searchActive) return;
+    setSelected((prev) => {
+      if (!prev.size) return prev;
+      const shownIds = new Set(visible.map((c) => c.id));
+      const next = new Set([...prev].filter((id) => shownIds.has(id)));
+      return next.size === prev.size ? prev : next;
+    });
+  }, [visible, searchActive]);
+
+  // Keyboard: "/" focuses search, Esc closes the panel or clears the selection, ↑/↓ (or j/k) step through cards,
+  // I / 1-4 / Delete sort the open card and Ctrl+Z takes the last of those back.
+  useEffect(() => {
+    function onKey(e: KeyboardEvent) {
+      // A dialog (Settings, Telegram, Tidy…) is on top: the board behind it doesn't react.
+      if (e.defaultPrevented || document.querySelector(".modal-backdrop")) return;
+      if ((e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey && e.code === "KeyK" && !todayOpen && !tidy) {
+        e.preventDefault();
+        setQuickOpen(true);
+        return;
+      }
+      // "Three for today" and "Tidy up" have keys of their own.
+      if (todayOpen || tidy) return;
+      const el = e.target as HTMLElement;
+      const typing = el.tagName === "INPUT" || el.tagName === "TEXTAREA" || el.tagName === "SELECT" || el.isContentEditable;
+      if (e.key === "Escape") {
+        if (typing) (el as HTMLInputElement).blur();
+        else if (openId != null) setOpenId(null);
+        else if (drawer) setDrawer(false);
+        else if (selected.size) setSelected(new Set());
+        return;
+      }
+      if (typing || e.defaultPrevented) return;
+      if ((e.ctrlKey || e.metaKey) && !e.shiftKey && e.code === "KeyZ" && keyUndo.current) {
+        e.preventDefault();
+        const u = keyUndo.current;
+        keyUndo.current = null;
+        onEdit([u.id], u.patch);
+        setOpenId(u.id);
+        return;
+      }
+      const k = openCard ? cardKey(e) : null;
+      if (k && openCard) {
+        e.preventDefault();
+        sortOpenCard(openCard, k);
+        return;
+      }
+      if (e.key === "/") {
+        e.preventDefault();
+        searchRef.current?.focus();
+      } else if (openId != null && (e.key === "ArrowDown" || e.key === "j") && openIdx < visible.length - 1) {
+        e.preventDefault();
+        setOpenId(visible[openIdx + 1].id);
+      } else if (openId != null && (e.key === "ArrowUp" || e.key === "k") && openIdx > 0) {
+        e.preventDefault();
+        setOpenId(visible[openIdx - 1].id);
+      }
+    }
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [openId, openIdx, openCard, visible, selected, drawer, todayOpen, tidy, rev]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const heading = scopeTitle(home || cleanup ? scope : shown);
+  const subtitle = [pile?.title, sub, type && TYPES.find((t) => t.key === type)?.label, source, tag && `#${tag}`].filter(Boolean).join(" · ");
+
+  return (
+    <div className={`workspace${showSide ? "" : " side-closed"}${openCard && openMode === "side" && !narrow ? " with-detail" : ""}${narrow ? " narrow" : ""}`}>
+      {narrow && drawer && <div className="drawer-scrim" onClick={() => setDrawer(false)} />}
+      {showSide && (
+        <Sidebar
+          drawer={narrow}
+          chatName={lib.chatName}
+          account={props.tgAccount}
+          scope={scope}
+          tag={tag}
+          listCounts={listCounts}
+          cleanupLeft={cleanupLeft}
+          topics={topics}
+          noTopic={noTopic}
+          tags={FEATURES.tags ? tags : []}
+          onScope={pickScope}
+          onTag={(t) => (setTag(t), setDrawer(false))}
+          tidyCount={tidyCount}
+          onTidy={() => (setDrawer(false), setTidy(FEATURES.tags ? "tags" : "topics"))}
+          onCreateTopic={async (name) => pickScope({ kind: "topic", name: await props.onCreateTopic(name) })}
+          onRenameTopic={async (from, to) => {
+            const name = await props.onRenameTopic(from, to);
+            if (scope.kind === "topic" && scope.name === from) pickScope({ kind: "topic", name });
+          }}
+          onDropCards={narrow ? undefined : (ids, t) => onEdit(ids, { topic: t })}
+          onDeleteTopic={async (name) => {
+            await props.onDeleteTopic(name);
+            if (scope.kind === "topic" && scope.name === name) pickScope({ kind: "home" });
+          }}
+        />
+      )}
+
+      <section className="content" inert={narrow && drawer ? true : undefined}>
+        <header className="toolbar">
+          <div className="toolbar-start">
+            <button ref={sideToggle} className="icon-btn" aria-expanded={showSide} aria-label={showSide ? T.toolbar.hideSidebar : T.toolbar.showSidebar} onClick={() => (narrow ? setDrawer(!drawer) : setSideOpen(!sideOpen))} title={showSide ? T.toolbar.hideSidebar : T.toolbar.showSidebar}>
+              <Icon name="sidebar" />
+            </button>
+            <div className="heading" title={heading}>
+              <h1>{heading}</h1>
+              <span className="count">
+                {formatNumber(cleanup ? cleanupLeft : visible.length)}
+                {subtitle && <> · {subtitle}</>}
+              </span>
+            </div>
+          </div>
+          <label className="search">
+            <Icon name="search" />
+            <input ref={searchRef} placeholder={T.toolbar.search} value={query} onChange={(e) => setQuery(e.target.value)} />
+            {query ? (
+              <button className="clear" onClick={() => setQuery("")} aria-label={T.toolbar.clear}>
+                <Icon name="close" size={14} />
+              </button>
+            ) : (
+              <kbd>/</kbd>
+            )}
+          </label>
+          <div className="toolbar-end">
+            <span className="local-badge" title={platform.kind === "web" ? T.toolbar.localHintWeb : T.toolbar.localHint}>
+              <Icon name="lock" size={13} />
+              <span>{T.toolbar.local}</span>
+            </span>
+            {props.job ? (
+              <span className="job">
+                <span className="progress" style={{ "--p": `${Math.round((props.job.done / Math.max(props.job.total, 1)) * 100)}%` } as React.CSSProperties} />
+                {props.job.label} {formatNumber(props.job.done)}/{formatNumber(props.job.total)}
+                <button className="secondary small-btn" onClick={props.onStop}>
+                  {T.common.stop}
+                </button>
+              </span>
+            ) : (
+              props.needAi > 0 &&
+              props.offerAi && (
+                <button className="secondary small-btn" onClick={props.onRunAi} title={T.toolbar.runAiHint}>
+                  <Icon name="sparkle" size={14} /> {T.toolbar.runAi(props.needAi)}
+                </button>
+              )
+            )}
+            {props.onLoadTelegram && (
+              <button className="icon-btn" onClick={props.onLoadTelegram} disabled={!!props.job} title={T.toolbar.loadTelegram}>
+                <Icon name="refresh" />
+              </button>
+            )}
+            {props.onImport && (
+              <button className="icon-btn" onClick={props.onImport} title={T.toolbar.import}>
+                <Icon name="import" />
+              </button>
+            )}
+            {props.onTelegram && (
+              <button className="icon-btn" onClick={props.onTelegram} title={T.toolbar.telegram}>
+                <Icon name="send" />
+              </button>
+            )}
+            <button className="icon-btn" onClick={props.onSettings} title={T.toolbar.settings}>
+              <Icon name="settings" />
+            </button>
+          </div>
+        </header>
+
+        {home ? (
+          <Overview
+            lib={lib}
+            sections={sections}
+            topics={topics}
+            tidyCount={tidyCount}
+            onTidy={() => setTidy(suggestMerges(names.topics).length || !FEATURES.tags ? "topics" : "tags")}
+            today={FEATURES.today && plan.keys.length ? todayTasks : undefined}
+            onToday={openToday}
+            onTodayMore={candidates(lib.cards, props.taskSkips, day).some((t) => !plan.keys.includes(t.key)) ? moreToday : undefined}
+            activeId={openId}
+            onScope={pickScope}
+            onOpen={(c) => setOpenId(c.id)}
+            onJunk={toggleJunk}
+            onPin={togglePin}
+            onMove={moveTo}
+            onSource={pickSource}
+            onOpenLink={(u) => void platform.openUrl(u)}
+            onDragStart={narrow ? undefined : (c, e) => dragCards([c.id], e)}
+            links={props.onCheckLinks ? links : undefined}
+            checking={!!props.job}
+            onCheckLinks={props.onCheckLinks}
+            onShowBroken={() => {
+              pickScope({ kind: "list", key: "all" });
+              setPile({ title: T.linkCheck.pile, ids: new Set(links.broken) });
+            }}
+            onJunkBroken={() => onEdit(links.broken, { action: "junk" })}
+          />
+        ) : cleanup ? (
+          <Cleanup
+            lib={lib}
+            breakdown={piles}
+            topics={topicNames}
+            session={cleanupSession}
+            onSession={setCleanupSession}
+            onEdit={onEdit}
+            onRule={props.onRule}
+            onView={viewPile}
+            onSensitive={() => pickScope({ kind: "list", key: "sensitive" })}
+            onBoard={() => pickScope({ kind: "list", key: "all" })}
+            onApplyTelegram={props.onApplyTelegram}
+          />
+        ) : (
+        <>
+        <div className="subbar">
+          {selected.size > 0 ? (
+            <div className="selection">
+              <b>{T.toolbar.selected(selected.size)}</b>
+              <button className="pill" onClick={() => setSelected(new Set(visible.map((c) => c.id)))}>
+                {T.toolbar.selectAll(visible.length)}
+              </button>
+              <button className="pill" onClick={() => onEdit([...selected], { pinned: true })}>
+                <Icon name="star" size={13} /> {T.nav.important}
+              </button>
+              <button className={`pill${bulkMoveAt ? " active" : ""}`} onClick={(e) => setBulkMoveAt(bulkMoveAt ? null : e.currentTarget)}>
+                <Icon name="folder" size={13} /> {T.move.bulk}
+              </button>
+              {bulkMoveAt && <TopicMenu anchor={bulkMoveAt} topics={topicNames} onPick={(t) => onEdit([...selected], { topic: t })} onClose={() => setBulkMoveAt(null)} />}
+              {FEATURES.statuses && (
+                <>
+                  <button className="pill" onClick={() => onEdit([...selected], { action: "read_later" })}>
+                    {actionLabel("read_later")}
+                  </button>
+                  <button className="pill" onClick={() => onEdit([...selected], { action: "idea" })}>
+                    {actionLabel("idea")}
+                  </button>
+                </>
+              )}
+              <button className="pill" onClick={() => (onEdit([...selected], { action: "junk" }), setSelected(new Set()))}>
+                {T.toolbar.toJunk}
+              </button>
+              <button className="pill ghost" onClick={() => setSelected(new Set())}>
+                {T.common.cancel}
+              </button>
+            </div>
+          ) : (
+            <div className="quick" ref={quickRef} onScroll={(e) => markEdges(e.currentTarget)}>
+              {pile && (
+                <>
+                  <button className="pill" onClick={() => pickScope({ kind: "cleanup" })}>
+                    <Icon name="left" size={13} /> {T.cleanup.backToCleanup}
+                  </button>
+                  <button className="pill active" onClick={() => setPile(null)} title={T.cleanup.showAll}>
+                    {pile.title} <Icon name="close" size={12} />
+                  </button>
+                </>
+              )}
+              {TYPES.map((t) =>
+                typeCounts[t.key] ? (
+                  <button key={t.key} className={`pill${type === t.key ? " active" : ""}`} aria-pressed={type === t.key} onClick={() => setType(type === t.key ? null : t.key)}>
+                    <Icon name={t.icon} size={13} /> {t.label}
+                  </button>
+                ) : null,
+              )}
+              {scope.kind === "topic" && (groups.length > 0 || props.onGroupTopic) && <span className="quick-sep" />}
+              {groups.map((g) => (
+                <button key={g.name} className={`pill${sub === g.name ? " active" : ""}`} aria-pressed={sub === g.name} onClick={() => setSub(sub === g.name ? null : g.name)}>
+                  {g.name} <small>{formatNumber(g.ids.size)}</small>
+                </button>
+              ))}
+              {scope.kind === "topic" && props.onGroupTopic && inScope.length >= GROUP_MIN && (
+                <button className="pill ghost" onClick={() => void groupTopic()} disabled={grouping} title={groupError ?? T.groups.hint}>
+                  <Icon name="sparkle" size={13} /> {grouping ? T.groups.working : groups.length ? T.groups.redo : T.groups.make}
+                </button>
+              )}
+              {groupError && <span className="quick-error">{groupError}</span>}
+              {source && (
+                <button className="pill active" onClick={() => setSource(null)} title={T.card.allFrom(source)}>
+                  {source} <Icon name="close" size={12} />
+                </button>
+              )}
+              {source && (
+                <button className="pill ghost" aria-haspopup="listbox" aria-expanded={!!ruleAt} onClick={(e) => setRuleAt(ruleAt ? null : e.currentTarget)} title={T.rules.channelHint}>
+                  <Icon name="folder" size={13} /> {getTopicRules().channels[source] ? T.rules.channelIs(topicName(getTopicRules().channels[source])) : T.rules.channelPick}
+                </button>
+              )}
+              {source && ruleAt && (
+                <TopicMenu
+                  anchor={ruleAt}
+                  topics={topicNames}
+                  current={getTopicRules().channels[source] ? topicName(getTopicRules().channels[source]) : undefined}
+                  onPick={(t) => props.onRule("channel", source, t)}
+                  onClose={() => setRuleAt(null)}
+                />
+              )}
+              {FEATURES.tags && tag && (
+                <button className="pill active" onClick={() => setTag(null)}>
+                  #{tag} <Icon name="close" size={12} />
+                </button>
+              )}
+            </div>
+          )}
+          <div className="spacer" />
+          <SortMenu value={sort} onChange={setSort} />
+          {FEATURES.views && <ViewMenu view={view} onView={setView} look={look} onLook={setLook} />}
+        </div>
+
+        {topicSuggest.length > 0 && scope.kind === "topic" && (
+          <SuggestBanner
+            cards={topicSuggest}
+            onAdd={(ids) => onEdit(ids, { topic: scope.name })}
+            onOpen={(c) => setOpenId(c.id)}
+            onHide={() => setHiddenSuggest(new Set([...hiddenSuggest, scope.name]))}
+          />
+        )}
+        <Grid
+          key={`${boardKey}|${query}`}
+          seen={seen}
+          lib={lib}
+          cards={visible}
+          view={view}
+          look={look}
+          selected={selected}
+          activeId={openId}
+          onOpen={(c) => setOpenId(c.id)}
+          onToggleSelect={toggleSelect}
+          onJunk={toggleJunk}
+          onPin={togglePin}
+          topics={topicNames}
+          onMove={moveTo}
+          suggest={suggest}
+          onSource={pickSource}
+          onOpenLink={(u) => void platform.openUrl(u)}
+          onDragStart={narrow ? undefined : (c, e) => dragCards(dragIds(new Set(visible.filter((x) => selected.has(x.id)).map((x) => x.id)), c.id), e)}
+          empty={shown.kind === "topic" && !inScope.length && !query.trim() ? { title: T.topics.emptyTitle, hint: T.topics.emptyHint } : undefined}
+        />
+        </>
+        )}
+      </section>
+
+      {tidy && (
+        <TidyDialog
+          topics={names.topics}
+          tags={FEATURES.tags ? names.tags : new Map()}
+          aliases={props.aliases}
+          initial={tidy}
+          askAi={props.askSynonyms}
+          onChange={props.onAliases}
+          onClose={() => setTidy(null)}
+        />
+      )}
+
+      {todayOpen && (
+        <TodayDialog
+          key={todayOpen.n}
+          lib={lib}
+          tasks={todayOpen.tasks}
+          start={todayOpen.start}
+          topics={topicNames}
+          onEdit={onEdit}
+          onDone={(key, skip) => (saveDone(key, true), skipTask(key, skip))}
+          onReopen={(key) => saveDone(key, false)}
+          onSkipGroup={(key, days) => skipTask(key, days ?? "never")}
+          left={() => {
+            const live = lib.cards.filter((c) => !c.removed && matchesFilter(c, "all"));
+            return { unsorted: live.filter(isUnsorted).length, dupes: countDuplicateGroups(live, findDuplicates(live)) };
+          }}
+          onMore={candidates(lib.cards, props.taskSkips, day).some((t) => !plan.keys.includes(t.key)) ? moreToday : undefined}
+          onClose={() => setTodayOpen(null)}
+        />
+      )}
+
+      {quickOpen && <QuickFind cards={lib.cards} index={index} onOpen={(c) => setOpenId(c.id)} onClose={() => setQuickOpen(false)} />}
+
+      {openCard && (
+        <Detail
+          key={`${openCard.id}:${openCard.ai?.at ?? ""}`}
+          lib={lib}
+          card={openCard}
+          topics={topics.map(([t]) => t)}
+          suggest={suggest}
+          mode={narrow ? "full" : openMode}
+          narrow={narrow}
+          onNameImage={props.onNameImage && openCard.kind === "photo" && !openCard.sensitive && !props.job ? () => props.onNameImage!(openCard) : undefined}
+          onMode={FEATURES.openModes ? setOpenMode : undefined}
+          onClose={() => setOpenId(null)}
+          onEdit={(p) => onEdit([openCard.id], p)}
+          onOpenInTelegram={props.onOpenInTelegram && !openCard.removed ? () => props.onOpenInTelegram!(openCard) : undefined}
+          onPrev={openIdx > 0 ? () => setOpenId(visible[openIdx - 1].id) : undefined}
+          onNext={openIdx >= 0 && openIdx < visible.length - 1 ? () => setOpenId(visible[openIdx + 1].id) : undefined}
+        />
+      )}
+    </div>
+  );
+}

@@ -1,0 +1,87 @@
+// Small stroke icon set so the sidebar and toolbar don't depend on emoji rendering.
+const PATHS: Record<string, string> = {
+  all: "M4 5h16M4 12h16M4 19h16",
+  inbox: "M3 13l3-8h12l3 8v6H3zM3 13h5l1 3h6l1-3h5",
+  clock: "M12 7v5l3 2M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0z",
+  bulb: "M9 18h6M10 21h4M12 3a6 6 0 0 0-3.5 10.9c.6.5 1 1.2 1 2.1h5c0-.9.4-1.6 1-2.1A6 6 0 0 0 12 3z",
+  check: "M5 12l4 4 10-10",
+  bookmark: "M6 3h12v18l-6-4-6 4z",
+  trash: "M4 7h16M10 11v6M14 11v6M6 7l1 13h10l1-13M9 7V4h6v3",
+  lock: "M6 11h12v9H6zM8 11V8a4 4 0 0 1 8 0v3",
+  eye: "M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7S2 12 2 12zM12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6z",
+  eyeOff: "M3 3l18 18M10.6 5.1A10 10 0 0 1 12 5c6.4 0 10 7 10 7a17 17 0 0 1-3.2 4M6.6 6.6A17 17 0 0 0 2 12s3.6 7 10 7a9.6 9.6 0 0 0 5.4-1.6M9.9 9.9a3 3 0 0 0 4.2 4.2",
+  folder: "M3 6h6l2 2h10v11H3z",
+  globe: "M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18zM3 12h18M12 3c2.5 2.6 3.8 5.6 3.8 9s-1.3 6.4-3.8 9c-2.5-2.6-3.8-5.6-3.8-9S9.5 5.6 12 3z",
+  link: "M10 14a4 4 0 0 0 5.7 0l3-3a4 4 0 0 0-5.7-5.7l-1 1M14 10a4 4 0 0 0-5.7 0l-3 3a4 4 0 0 0 5.7 5.7l1-1",
+  photo: "M3 5h18v14H3zM3 16l5-5 4 4 3-3 6 6M15.5 9.5a1.5 1.5 0 1 0 0-.01",
+  video: "M3 6h13v12H3zM16 10l5-3v10l-5-3",
+  play: "M8 5.5v13l11-6.5z",
+  file: "M6 3h8l4 4v14H6zM14 3v4h4",
+  hash: "M5 9h14M5 15h14M10 4L8 20M16 4l-2 16",
+  masonry: "M4 4h7v9H4zM13 4h7v5h-7zM4 15h7v5H4zM13 11h7v9h-7z",
+  grid: "M4 4h7v7H4zM13 4h7v7h-7zM4 13h7v7H4zM13 13h7v7h-7z",
+  list: "M4 5h5v5H4zM4 14h5v5H4zM12 7h8M12 16h8",
+  rows: "M4 6h16M4 10h16M4 14h16M4 18h16",
+  search: "M11 18a7 7 0 1 0 0-14 7 7 0 0 0 0 14zM20 20l-4-4",
+  sidebar: "M3 4h18v16H3zM9 4v16",
+  settings: "M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6zM19 12l2-1-1-3-2 .3-1.5-1.5L17 5l-3-1-1 2h-2L10 4 7 5l.5 2L6 8.5 4 8l-1 3 2 1v0l-2 1 1 3 2-.3 1.5 1.5L7 19l3 1 1-2h2l1 2 3-1-.5-2 1.5-1.5 2 .5 1-3z",
+  import: "M12 3v12M7 10l5 5 5-5M4 21h16",
+  export: "M12 15V3M7 8l5-5 5 5M4 21h16",
+  sparkle: "M12 3l1.8 5.2L19 10l-5.2 1.8L12 17l-1.8-5.2L5 10l5.2-1.8zM19 16l.8 2.2L22 19l-2.2.8L19 22l-.8-2.2L16 19l2.2-.8z",
+  external: "M14 4h6v6M20 4l-9 9M18 14v6H4V6h6",
+  close: "M6 6l12 12M18 6L6 18",
+  up: "M6 15l6-6 6 6",
+  down: "M6 9l6 6 6-6",
+  right: "M9 6l6 6-6 6",
+  left: "M15 6l-6 6 6 6",
+  refresh: "M20 12a8 8 0 1 1-2.3-5.7M20 4v4h-4",
+  restore: "M4 12a8 8 0 1 0 3-6.2M4 4v4h4",
+  select: "M4 4h16v16H4zM8 12l3 3 5-6",
+  music: "M9 18V5l11-2v13M9 18a3 3 0 1 1-6 0 3 3 0 0 1 6 0zM20 16a3 3 0 1 1-6 0 3 3 0 0 1 6 0z",
+  mic: "M12 3a3 3 0 0 0-3 3v6a3 3 0 0 0 6 0V6a3 3 0 0 0-3-3zM5 11a7 7 0 0 0 14 0M12 18v3",
+  pin: "M12 21s7-6.2 7-12a7 7 0 0 0-14 0c0 5.8 7 12 7 12zM12 11a2 2 0 1 0 0-4 2 2 0 0 0 0 4z",
+  user: "M12 12a4 4 0 1 0 0-8 4 4 0 0 0 0 8zM4 21a8 8 0 0 1 16 0",
+  chart: "M4 20V10M10 20V4M16 20v-7M22 20H2",
+  text: "M5 6h14M5 12h14M5 18h9",
+  peekCenter: "M3 4h18v16H3zM7 8h10v8H7z",
+  peekSide: "M3 4h18v16H3zM13 4v16",
+  peekFull: "M4 9V4h5M15 4h5v5M20 15v5h-5M9 20H4v-5",
+  send: "M21 3L10 14M21 3l-7 18-4-7-7-4z",
+  flag: "M5 21V4M5 4h12l-2.5 4L17 12H5",
+  sortNew: "M9 9v3l2 1.5M15 12a6 6 0 1 1-12 0 6 6 0 0 1 12 0zM19 5v14M16.5 16.5L19 19l2.5-2.5",
+  sortOld: "M9 9v3l2 1.5M15 12a6 6 0 1 1-12 0 6 6 0 0 1 12 0zM19 19V5M16.5 7.5L19 5l2.5 2.5",
+  sortAz: "M3 10l3-7 3 7M4.3 7.5h3.4M3 14h6l-6 7h6M18 4v16M15.5 17.5L18 20l2.5-2.5",
+  sortZa: "M3 3h6l-6 7h6M3 21l3-7 3 7M4.3 18.5h3.4M18 4v16M15.5 17.5L18 20l2.5-2.5",
+  sun: "M12 16a4 4 0 1 0 0-8 4 4 0 0 0 0 8zM12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4",
+  moon: "M20 14.5A8 8 0 0 1 9.5 4 8 8 0 1 0 20 14.5z",
+  star: "M12 3.5l2.6 5.3 5.9.9-4.3 4.1 1 5.8-5.2-2.7-5.2 2.7 1-5.8-4.3-4.1 5.9-.9z",
+  home: "M4 11l8-7 8 7v9h-5v-6H9v6H4z",
+  merge: "M6 4v4a6 6 0 0 0 6 6h0a6 6 0 0 1 6 6M18 4v4a6 6 0 0 1-6 6M3 7l3-3 3 3M15 7l3-3 3 3",
+  plus: "M12 5v14M5 12h14",
+  more: "M5.5 12h.01M12 12h.01M18.5 12h.01",
+  pencil: "M4 20h4L19 9l-4-4L4 16zM13.5 6.5l4 4",
+  copy: "M8 8h12v12H8zM4 16V4h12",
+  monitor: "M3 4h18v12H3zM8 20h8M12 16v4",
+  broom: "M21 3l-9 9M9.5 9.5l5 5M9.5 9.5l-7 4 8 8 4-7M11 11l-5.5 5.5M13 13l-5.5 5.5",
+};
+
+export type IconName = keyof typeof PATHS;
+
+export function Icon({ name, size = 16, className }: { name: IconName | string; size?: number; className?: string }) {
+  return (
+    <svg
+      className={`icon${className ? ` ${className}` : ""}`}
+      width={size}
+      height={size}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={1.8}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <path d={PATHS[name] ?? PATHS.file} />
+    </svg>
+  );
+}
